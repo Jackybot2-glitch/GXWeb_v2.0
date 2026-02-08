@@ -97,10 +97,58 @@ class DataLoader:
         ncode = self.normalize_code(code)
 
         # 尝试从QuantData加载
-        data_path = self.data_root / "daily" / f"{ncode}.csv"
+        # 优先检查 stock_daily 目录
+        data_path = self.data_root / "stock_daily" / f"{ncode}.csv"
+        if not data_path.exists():
+            # 备选 daily 目录
+            data_path = self.data_root / "daily" / f"{ncode}.csv"
 
         if data_path.exists():
-            df = pd.read_csv(data_path)
+            # 尝试多种编码
+            for enc in ['utf-8', 'gbk', 'gb2312', 'gb18030']:
+                try:
+                    # 跳过前2行，逗号分隔
+                    df = pd.read_csv(
+                        data_path,
+                        encoding=enc,
+                        skiprows=2,
+                        header=None,
+                        names=['date', 'open', 'high', 'low', 'close', 'volume', 'amount']
+                    )
+                    if len(df) > 0:
+                        break
+                except Exception:
+                    continue
+            else:
+                # 如果所有编码都失败，返回空
+                return pd.DataFrame()
+
+            # 设置列名
+            if len(df.columns) == 8:
+                df.columns = ['date', 'open', 'high', 'low', 'close', 'volume', 'amount', 'adjust']
+            elif len(df.columns) == 7:
+                df.columns = ['date', 'open', 'high', 'low', 'close', 'volume', 'amount']
+            elif len(df.columns) == 6:
+                df.columns = ['date', 'open', 'high', 'low', 'close', 'volume']
+            else:
+                # 使用通用列名
+                df.columns = [f'col_{i}' for i in range(len(df.columns))]
+
+            # 清理数据：移除空行和无效数据
+            df = df.dropna(subset=['date'])
+            df = df[df['date'].astype(str).str.strip() != '']
+
+            # 转换数值列
+            numeric_cols = ['open', 'high', 'low', 'close', 'volume', 'amount']
+            for col in numeric_cols:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
+
+            # 添加 datetime 列
+            if 'date' in df.columns:
+                df['datetime'] = pd.to_datetime(df['date'], errors='coerce')
+                df = df.dropna(subset=['datetime'])
+                df = df.sort_values('datetime')
             # 转换日期
             if 'trade_date' in df.columns:
                 df['datetime'] = pd.to_datetime(df['trade_date'])
