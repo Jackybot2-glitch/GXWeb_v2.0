@@ -4,7 +4,7 @@
 提供股票价格预测 API 接口
 """
 
-from typing import Optional, List
+from typing import Optional, List, Dict
 from datetime import datetime
 from enum import Enum
 
@@ -12,6 +12,8 @@ from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 
 from backend.models import ModelRegistry, PredictionResult
+from backend.data_loader import get_data_loader
+from backend.prediction.storage import get_prediction_storage
 from backend.log import logger
 
 
@@ -151,6 +153,16 @@ async def run_prediction(request: PredictionRequest):
         if result is None:
             raise HTTPException(status_code=500, detail="预测失败")
 
+        # 保存预测结果
+        try:
+            storage = get_prediction_storage()
+            task_id = storage.save_result(request.code, request.model, result)
+            result.metadata = result.metadata or {}
+            result.metadata["task_id"] = task_id
+        except Exception as storage_error:
+            logger.warning(f"保存预测结果失败: {storage_error}")
+            # 继续返回结果，不因存储失败而中断
+
         return PredictionResponse(
             success=result.metadata.get("error") is None if result.metadata else True,
             code=result.code,
@@ -210,12 +222,83 @@ async def quick_predict(
 @app.get("/predict/{code}/result/{task_id}", response_model=PredictionResponse, summary="获取预测结果")
 async def get_prediction_result(task_id: str):
     """
-    获取预测结果（异步任务结果）
+    获取预测结果
 
-    预留接口，用于获取异步预测任务的结果
+    根据任务ID获取之前保存的预测结果
     """
-    # TODO: 实现异步任务结果存储和查询
-    raise HTTPException(status_code=501, detail="异步任务功能待实现")
+    try:
+        storage = get_prediction_storage()
+        result = storage.get_result(task_id)
+
+        if result is None:
+            raise HTTPException(status_code=404, detail=f"预测结果不存在: {task_id}")
+
+        return PredictionResponse(
+            success=True,
+            code=result.get("code", ""),
+            model=result.get("model", ""),
+            prediction=result.get("prediction", 0.0),
+            confidence=result.get("confidence", 0.0),
+            period=result.get("period", ""),
+            created_at=result.get("created_at", ""),
+            metadata=result.get("metadata", {}),
+            error=None
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"获取预测结果失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/predict/results", response_model=List[PredictionResponse], summary="列出预测结果")
+async def list_predictions(
+    code: Optional[str] = None,
+    model: Optional[str] = None,
+    limit: int = Query(10, ge=1, le=100)
+):
+    """
+    列出预测结果
+
+    可按股票代码和模型名称过滤
+    """
+    try:
+        storage = get_prediction_storage()
+        results = storage.list_predictions(code=code, model=model, limit=limit)
+
+        return [
+            PredictionResponse(
+                success=True,
+                code=r["code"],
+                model=r["model"],
+                prediction=r["prediction"],
+                confidence=0.0,
+                period="",
+                created_at=r["created_at"],
+                metadata={"task_id": r["task_id"]},
+                error=None
+            )
+            for r in results
+        ]
+
+    except Exception as e:
+        logger.error(f"列出预测结果失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/predict/statistics", summary="获取预测统计")
+async def get_statistics():
+    """
+    获取预测统计信息
+    """
+    try:
+        storage = get_prediction_storage()
+        return storage.get_statistics()
+
+    except Exception as e:
+        logger.error(f"获取统计失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/predict/{code}/status", summary="预测状态")
